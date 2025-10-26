@@ -113,8 +113,38 @@ async def get_job_results(job_id: str):
 
 @app.get("/sourcing-jobs")
 async def list_all_jobs():
+    """
+    Get all jobs with their basic info for search history.
+    Returns jobs sorted by most recent first.
+    """
     jobs = db.get_all_jobs()
-    return {"jobs": jobs}
+    
+    # Enhance jobs with candidate counts
+    enhanced_jobs = []
+    for job in jobs:
+        candidate_count = len(db.get_candidates_by_job_id(job['job_id']))
+        job['candidate_count'] = candidate_count
+        enhanced_jobs.append(job)
+    
+    return {"jobs": enhanced_jobs}
+
+@app.get("/sourcing-jobs/recent")
+async def get_recent_jobs(limit: int = 20):
+    """
+    Get recent completed jobs for quick access to history.
+    """
+    all_jobs = db.get_all_jobs()
+    completed_jobs = [job for job in all_jobs if job.get('status') == 'completed']
+    
+    # Return most recent N jobs
+    recent_jobs = completed_jobs[:limit]
+    
+    # Add candidate counts
+    for job in recent_jobs:
+        candidate_count = len(db.get_candidates_by_job_id(job['job_id']))
+        job['candidate_count'] = candidate_count
+    
+    return {"jobs": recent_jobs, "total": len(completed_jobs)}
 
 
 @app.delete("/sourcing-jobs/{job_id}", response_model=DeleteResponse)
@@ -287,6 +317,24 @@ async def generate_prompts_from_jd(jd_text: str):
         print(f"Error generating prompts: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate prompts: {str(e)}")
+
+@app.post("/cleanup-old-jobs")
+async def cleanup_old_jobs(days_old: int = 30):
+    """
+    Delete jobs and candidates older than specified days.
+    Default: 30 days
+    """
+    try:
+        result = db.cleanup_old_jobs(days_old)
+        return {
+            "success": True,
+            "deleted_jobs": result["deleted_jobs_count"],
+            "deleted_candidates": result["deleted_candidates_count"],
+            "cutoff_date": result["cutoff_date"],
+            "message": f"Cleaned up jobs older than {days_old} days"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cleanup old jobs: {str(e)}")
 
 @app.get("/")
 async def root():

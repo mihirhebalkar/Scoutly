@@ -24,7 +24,7 @@ class PromptGenerator:
         
         Guidelines:
         1. Focus on the most important skills and job title
-        2. Include location if specified, otherwise use a major tech hub
+        2. Include location if specified, otherwise default to India
         3. Consider experience level requirements
         4. Make the prompt concise but comprehensive
         5. Use terms that are commonly found on LinkedIn profiles
@@ -72,7 +72,7 @@ class PromptGenerator:
         
         Guidelines:
         1. Focus on technical skills, programming languages, and frameworks
-        2. Include location if specified, otherwise use a major tech hub
+        2. Include location if specified, otherwise default to India
         3. Consider the technical stack and tools mentioned
         4. Make the prompt focused on technologies that would appear in repositories
         5. Prioritize the most critical technical skills
