@@ -3,8 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   FaBars, FaTimes, FaSearch, FaUpload, FaChartLine, FaUsers, FaEnvelope, 
-  FaCog, FaQuestionCircle, FaSignOutAlt, FaUserCircle, FaChevronDown
+  FaCog, FaQuestionCircle, FaSignOutAlt, FaUserCircle, FaChevronDown,
+  FaFileAlt, FaEdit, FaCheck, FaMapMarkerAlt, FaBriefcase, FaUserTie,
+  FaGithub, FaLinkedin
 } from 'react-icons/fa';
+import axios from 'axios';
 
 const Dashboard = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -16,8 +19,18 @@ const Dashboard = () => {
   const [showUserMenu, setShowUserMenu] = useState(false);
   const pollIntervalRef = useRef(null);
   
+  // New states for JD processing
+  const [jdProcessingState, setJdProcessingState] = useState(null); // null, 'processing', 'completed'
+  const [structuredJD, setStructuredJD] = useState(null);
+  const [generatedPrompts, setGeneratedPrompts] = useState(null);
+  const [showPrompts, setShowPrompts] = useState(false);
+  const [editablePrompts, setEditablePrompts] = useState({ linkedin: '', github: '' });
+  
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  
+  const API_URL = 'http://localhost:5000';
+  const FASTAPI_URL = 'http://127.0.0.1:8000';
 
   const toggleMenu = () => {
     setIsMenuOpen(!isMenuOpen);
@@ -29,9 +42,67 @@ const Dashboard = () => {
   };
 
   const handleFileChange = (e) => {
-    setFile(e.target.files[0]);
-    if (e.target.files[0]) {
+    const selectedFile = e.target.files[0];
+    setFile(selectedFile);
+    if (selectedFile) {
       setJobDescription('');
+      setStructuredJD(null);
+      setGeneratedPrompts(null);
+      setJdProcessingState(null);
+      setShowPrompts(false);
+    }
+  };
+  
+  const processJD = async () => {
+    if (!jobDescription && !file) {
+      alert('Please provide a job description or upload a file');
+      return;
+    }
+    
+    setJdProcessingState('processing');
+    setLoadingMessage('Processing job description...');
+    
+    try {
+      const token = localStorage.getItem('token');
+      const formData = new FormData();
+      
+      if (file) {
+        formData.append('file', file);
+      } else if (jobDescription) {
+        formData.append('jd_text', jobDescription);
+      }
+      
+      const response = await axios.post(
+        `${API_URL}/api/process-jd`,
+        formData,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'multipart/form-data',
+          },
+        }
+      );
+      
+      if (response.data.success) {
+        setStructuredJD(response.data.structured_jd);
+        setGeneratedPrompts({
+          linkedin: response.data.linkedin_prompt,
+          github: response.data.github_prompt
+        });
+        setEditablePrompts({
+          linkedin: response.data.linkedin_prompt,
+          github: response.data.github_prompt
+        });
+        setJdProcessingState('completed');
+        setShowPrompts(true);
+        setLoadingMessage('');
+      } else {
+        throw new Error('Failed to process job description');
+      }
+    } catch (error) {
+      console.error('Error processing JD:', error);
+      setResults({ error: error.response?.data?.error || 'Failed to process job description' });
+      setJdProcessingState(null);
     }
   };
 
@@ -41,65 +112,76 @@ const Dashboard = () => {
     }
     pollIntervalRef.current = setInterval(async () => {
       try {
-        setLoadingMessage('Checking job status...');
-        const response = await fetch(`http://127.0.0.1:8000/sourcing-jobs/${jobId}/results`);
-        if (response.status === 200) {
-          clearInterval(pollIntervalRef.current);
-          const data = await response.json();
+        setLoadingMessage('Searching for candidates...');
+        const response = await fetch(`${FASTAPI_URL}/sourcing-jobs/${jobId}/results`);
+        const data = await response.json();
+        
+        // Show results immediately if we have any
+        if (data.candidates && data.candidates.length > 0) {
           setResults(data);
+        }
+        
+        // Check if job is completed
+        if (data.status === 'completed') {
+          clearInterval(pollIntervalRef.current);
           setIsLoading(false);
-        } else if (response.status === 400) {
-          const errorData = await response.json();
-          setLoadingMessage(`Job Status: ${errorData.detail.split(': ')[1] || 'In Progress...'}`);
+          setLoadingMessage('');
+          // Force update to latest results
+          setResults(data);
+        } else if (data.status === 'failed') {
+          clearInterval(pollIntervalRef.current);
+          setIsLoading(false);
+          setResults({ error: data.detail || 'Job failed' });
         } else {
-          throw new Error(`Failed to get job status: ${response.statusText}`);
+          // Still running, continue polling
+          setLoadingMessage(`Found ${data.candidate_count || 0} candidates... Still searching...`);
         }
       } catch (error) {
         console.error('Polling error:', error);
-        setResults({ error: 'Failed to retrieve job results.' });
-        setIsLoading(false);
-        clearInterval(pollIntervalRef.current);
+        // If job not found or other error, stop polling
+        if (error.response?.status === 404) {
+          setResults({ error: 'Job not found' });
+          setIsLoading(false);
+          clearInterval(pollIntervalRef.current);
+        } else if (error.message) {
+          // Log the error but continue polling (might be network issue)
+          console.warn('Polling warning:', error.message);
+        }
       }
     }, 5000);
   };
 
-  const handleSearch = async () => {
+  const handleStartSearch = async () => {
+    if (!editablePrompts.linkedin && !editablePrompts.github) {
+      alert('Please provide at least one prompt (LinkedIn or GitHub)');
+      return;
+    }
+    
     setIsLoading(true);
     setResults(null);
     setLoadingMessage('Creating sourcing job...');
-    let promptText = jobDescription;
-    if (file) {
-      try {
-        promptText = await file.text();
-      } catch (error) {
-        console.error('Error reading file:', error);
-        setResults({ error: 'Could not read the uploaded file.' });
-        setIsLoading(false);
-        return;
-      }
-    }
-    if (!promptText) {
-      console.error("No job description or file content provided.");
-      setResults({ error: 'Please provide a job description or a file.' });
-      setIsLoading(false);
-      return;
-    }
+    setShowPrompts(false);
+    
     try {
-      const response = await fetch('http://127.0.0.1:8000/sourcing-jobs', {
+      const response = await fetch(`${FASTAPI_URL}/sourcing-jobs`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
         body: JSON.stringify({
-          linkedin_prompt: promptText,
+          linkedin_prompt: editablePrompts.linkedin,
+          github_prompt: editablePrompts.github,
         }),
       });
+      
       if (!response.ok) {
         throw new Error(`Server error: ${response.statusText}`);
       }
+      
       const jobData = await response.json();
       const { job_id } = jobData;
+      
       if (job_id) {
         setLoadingMessage('Job created successfully! Now polling for results...');
         pollForResults(job_id);
@@ -293,7 +375,7 @@ const Dashboard = () => {
                   <input
                     id="file-upload"
                     type="file"
-                    accept=".txt,.md,.pdf,.doc,.docx"
+                    accept=".txt,.md,.pdf,.jpg,.jpeg,.png"
                     className="hidden"
                     onChange={handleFileChange}
                   />
@@ -301,7 +383,12 @@ const Dashboard = () => {
                     <div className="text-center">
                       <p className="text-sm font-medium text-gray-700">{file.name}</p>
                       <button
-                        onClick={() => setFile(null)}
+                        onClick={() => {
+                          setFile(null);
+                          setStructuredJD(null);
+                          setGeneratedPrompts(null);
+                          setShowPrompts(false);
+                        }}
                         className="text-xs text-red-600 hover:text-red-700 mt-1"
                       >
                         Remove
@@ -310,24 +397,127 @@ const Dashboard = () => {
                   )}
                 </div>
                 <button
-                  className={`flex items-center justify-center gap-2 px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold shadow-lg hover:shadow-xl transition-all ${isLoading ? 'opacity-60 cursor-not-allowed' : 'hover:from-blue-700 hover:to-indigo-700'}`}
-                  onClick={handleSearch}
-                  disabled={isLoading}
+                  className={`flex items-center justify-center gap-2 px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg font-semibold shadow-lg hover:shadow-xl transition-all ${jdProcessingState === 'processing' ? 'opacity-60 cursor-not-allowed' : 'hover:from-blue-700 hover:to-indigo-700'}`}
+                  onClick={processJD}
+                  disabled={jdProcessingState === 'processing'}
                 >
-                  {isLoading ? (
+                  {jdProcessingState === 'processing' ? (
                     <>
                       <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                      Searching...
+                      Processing...
                     </>
                   ) : (
                     <>
-                      <FaSearch /> Search Candidates
+                      <FaFileAlt /> Process JD
                     </>
                   )}
                 </button>
               </div>
             </div>
           </div>
+
+          {/* Structured JD Display */}
+          {structuredJD && showPrompts && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8 mb-8">
+              <h2 className="text-xl font-bold text-gray-900 mb-6 flex items-center gap-2">
+                <FaCheck className="text-green-600" /> Job Description Processed
+              </h2>
+              
+              {/* Job Details */}
+              <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-6 mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {structuredJD.job_title && (
+                    <div className="flex items-start gap-3">
+                      <FaBriefcase className="text-blue-600 mt-1" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-600">Job Title</p>
+                        <p className="text-lg font-bold text-gray-900">{structuredJD.job_title}</p>
+                      </div>
+                    </div>
+                  )}
+                  {structuredJD.location && (
+                    <div className="flex items-start gap-3">
+                      <FaMapMarkerAlt className="text-blue-600 mt-1" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-600">Location</p>
+                        <p className="text-lg font-bold text-gray-900">{structuredJD.location}</p>
+                      </div>
+                    </div>
+                  )}
+                  {structuredJD.experience_required && (
+                    <div className="flex items-start gap-3">
+                      <FaUserTie className="text-blue-600 mt-1" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-600">Experience</p>
+                        <p className="text-lg font-bold text-gray-900">{structuredJD.experience_required}</p>
+                      </div>
+                    </div>
+                  )}
+                  {structuredJD.skills_required && structuredJD.skills_required.length > 0 && (
+                    <div className="flex items-start gap-3">
+                      <FaChartLine className="text-blue-600 mt-1" />
+                      <div>
+                        <p className="text-sm font-medium text-gray-600">Skills</p>
+                        <div className="flex flex-wrap gap-2 mt-2">
+                          {structuredJD.skills_required.slice(0, 5).map((skill, idx) => (
+                            <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded-full">
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Generated Prompts */}
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold text-gray-900 mb-4">Generated Search Prompts</h3>
+                
+                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    LinkedIn Prompt
+                  </label>
+                  <textarea
+                    value={editablePrompts.linkedin}
+                    onChange={(e) => setEditablePrompts({ ...editablePrompts, linkedin: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg p-3 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    rows={2}
+                  />
+                </div>
+
+                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    GitHub Prompt
+                  </label>
+                  <textarea
+                    value={editablePrompts.github}
+                    onChange={(e) => setEditablePrompts({ ...editablePrompts, github: e.target.value })}
+                    className="w-full border border-gray-300 rounded-lg p-3 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    rows={2}
+                  />
+                </div>
+
+                <button
+                  className="w-full flex items-center justify-center gap-2 px-8 py-4 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-lg font-semibold shadow-lg hover:shadow-xl transition-all hover:from-green-700 hover:to-emerald-700"
+                  onClick={handleStartSearch}
+                  disabled={isLoading}
+                >
+                  {isLoading ? (
+                    <>
+                      <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      Searching Candidates...
+                    </>
+                  ) : (
+                    <>
+                      <FaSearch /> Start Candidate Search
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Results Section */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
@@ -339,28 +529,65 @@ const Dashboard = () => {
             )}
             {results && !results.error && (
               <div className="results-container">
-                <h2 className="text-2xl font-bold mb-6 text-gray-900">Top Candidate Matches</h2>
+                <div className="flex items-center justify-between mb-6">
+                  <h2 className="text-2xl font-bold text-gray-900">Top Candidate Matches</h2>
+                  <p className="text-sm text-gray-600">
+                    {results.candidate_count || 0} candidates found
+                  </p>
+                </div>
                 {results.candidates && results.candidates.length > 0 ? (
                   <div className="grid gap-6 md:grid-cols-2">
-                    {results.candidates.map((candidate, index) => (
-                      <div key={index} className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow bg-gradient-to-br from-white to-gray-50">
-                        <div className="flex items-start justify-between mb-4">
-                          <h3 className="text-lg font-bold text-gray-900">{candidate.name || 'N/A'}</h3>
-                          <span className="px-3 py-1 bg-blue-100 text-blue-700 text-xs font-semibold rounded-full">
-                            Match #{index + 1}
-                          </span>
+                    {results.candidates.map((candidate, index) => {
+                      const isGitHub = candidate.source === 'GitHub';
+                      const isLinkedIn = candidate.source === 'LinkedIn';
+                      const scoreColor = candidate.match_score >= 80 ? 'bg-green-100 text-green-800' :
+                                         candidate.match_score >= 60 ? 'bg-yellow-100 text-yellow-800' :
+                                         'bg-orange-100 text-orange-800';
+                      
+                      return (
+                        <div key={index} className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow bg-gradient-to-br from-white to-gray-50">
+                          <div className="flex items-start justify-between mb-4">
+                            <div className="flex-1">
+                              <h3 className="text-lg font-bold text-gray-900">{candidate.name || 'N/A'}</h3>
+                              {candidate.title && (
+                                <p className="text-sm text-gray-500 mt-1">{candidate.title}</p>
+                              )}
+                            </div>
+                            <span className={`px-3 py-1 text-xs font-semibold rounded-full ${scoreColor}`}>
+                              {candidate.match_score || 0}%
+                            </span>
+                          </div>
+                          
+                          <div className="flex items-center gap-2 mb-4">
+                            {isLinkedIn && (
+                              <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 text-blue-700 text-xs font-semibold rounded">
+                                <FaLinkedin /> LinkedIn
+                              </span>
+                            )}
+                            {isGitHub && (
+                              <span className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-700 text-xs font-semibold rounded">
+                                <FaGithub /> GitHub
+                              </span>
+                            )}
+                          </div>
+                          
+                          <p className="text-sm text-gray-600 mb-4 line-clamp-3">{candidate.snippet || 'N/A'}</p>
+                          
+                          {candidate.reasoning && (
+                            <p className="text-xs text-gray-500 mb-4 italic">{candidate.reasoning}</p>
+                          )}
+                          
+                          <a 
+                            href={candidate.link} 
+                            target="_blank" 
+                            rel="noopener noreferrer" 
+                            className="inline-flex items-center gap-2 text-sm font-medium text-blue-600 hover:text-blue-700 transition"
+                          >
+                            View Profile →
+                          </a>
                         </div>
-                        <p className="text-sm text-gray-600 mb-4 line-clamp-3">{candidate.snippet || 'N/A'}</p>
-                        <a 
-                          href={candidate.link} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
-                          className="inline-flex items-center gap-2 text-sm font-medium text-blue-600 hover:text-blue-700 transition"
-                        >
-                          View LinkedIn Profile →
-                        </a>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : (
                   <div className="text-center py-12">
