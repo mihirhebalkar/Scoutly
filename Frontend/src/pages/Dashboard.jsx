@@ -43,8 +43,15 @@ const Dashboard = () => {
   const [historyIndex, setHistoryIndex] = useState(0);
   
   const CANDIDATES_PER_PAGE = 6;
-  const API_URL = 'http://localhost:5000';
-  const FASTAPI_URL = 'http://127.0.0.1:8000';
+const API_URL =
+  process.env.NODE_ENV === 'production'
+    ? 'https://scoutly13-api.vercel.app'  // Node.js backend on Vercel
+    : 'http://localhost:5000';
+
+const FASTAPI_URL =
+  process.env.NODE_ENV === 'production'
+    ? 'https://scoutly13-fastapi.vercel.app'  // FastAPI backend
+    : 'http://localhost:8000';
 
   // Load search history
   const loadSearchHistory = async () => {

@@ -48,9 +48,19 @@ app.post("/api/saved-candidates/resume", auth, upload.single("file"), async (req
 
 // Middlewares
 app.use(express.json());
+const allowedOrigins = [
+  "https://scoutly13.vercel.app", // deployed frontend
+  "http://localhost:5173" // local dev
+];
+
 app.use(cors({
-  origin: "http://localhost:5173",  // React Vite frontend URL
-  methods: ["GET", "POST", "PUT", "DELETE"],
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
   credentials: true
 }));
  
