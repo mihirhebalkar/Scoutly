@@ -83,8 +83,8 @@ class TalentPipelineDB:
             return []
 
     # Saved candidates API helpers
-    def save_candidate_for_job(self, job_id: str, candidate_link: str, name: str | None, notes: str | None, contacted: bool, review: int | None, job_title: str | None, email: str | None = None, linkedin: str | None = None, resume_file_id: str | None = None):
-        doc = {
+    def save_candidate_for_job(self, job_id: str, candidate_link: str, name: str | None, notes: str | None, contacted: bool, review: int | None, job_title: str | None, email: str | None = None, linkedin: str | None = None, resume_file_id: str | None = None, rank: int | None = None, match_score: int | None = None, reasoning: str | None = None, hired: bool | None = None):
+        set_doc = {
             "job_id": job_id,
             "candidate_link": candidate_link,
             "name": name,
@@ -95,14 +95,31 @@ class TalentPipelineDB:
             "email": email,
             "linkedin": linkedin,
             "resume_file_id": resume_file_id,
+            "rank": rank,
+            "match_score": match_score,
+            "reasoning": reasoning,
             "updated_at": datetime.datetime.utcnow(),
         }
+        # Only update 'hired' if explicitly provided as boolean
+        if isinstance(hired, bool):
+            set_doc["hired"] = hired
         try:
             self.saved_candidates_collection.update_one(
                 {"job_id": job_id, "candidate_link": candidate_link},
-                {"$set": doc, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}},
+                {"$set": set_doc, "$setOnInsert": {"created_at": datetime.datetime.utcnow()}},
                 upsert=True
             )
+            # If this candidate is marked hired=True, ensure all other candidates for this job are not hired
+            if isinstance(hired, bool) and hired is True:
+                self.saved_candidates_collection.update_many(
+                    {"job_id": job_id, "candidate_link": {"$ne": candidate_link}},
+                    {"$set": {"hired": False, "updated_at": datetime.datetime.utcnow()}}
+                )
+                # Also reflect this on the job status
+                try:
+                    self.update_job_status(job_id, "hired")
+                except Exception:
+                    pass
             return True
         except Exception as e:
             print(f"  -> Failed saving candidate for job {job_id}: {e}")
@@ -119,6 +136,9 @@ class TalentPipelineDB:
         for d in docs:
             title = d.get("job_title") or "Untitled Job"
             grouped.setdefault(title, []).append(d)
+        # sort each group by rank then updated_at
+        for k, arr in grouped.items():
+            arr.sort(key=lambda x: (x.get('rank') if isinstance(x.get('rank'), int) else 1_000_000, -x.get('updated_at').timestamp() if x.get('updated_at') else 0))
         return grouped
 
     def delete_saved_candidate(self, job_id: str, candidate_link: str) -> bool:

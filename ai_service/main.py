@@ -104,6 +104,11 @@ class SaveCandidateRequest(BaseModel):
     job_title: Optional[str] = None
     email: Optional[str] = None
     linkedin: Optional[str] = None
+    # New optional fields for ranking and rationale
+    rank: Optional[int] = Field(None, ge=0)
+    match_score: Optional[int] = Field(None, ge=0, le=100)
+    reasoning: Optional[str] = None
+    hired: Optional[bool] = None
 
 def _derive_job_title(job: Optional[dict]) -> Optional[str]:
     if not job:
@@ -141,6 +146,10 @@ async def save_candidate(req: SaveCandidateRequest):
         job_title=title,
         email=req.email,
         linkedin=req.linkedin,
+        rank=req.rank,
+        match_score=req.match_score,
+        reasoning=req.reasoning,
+        hired=req.hired,
     )
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to save candidate")
@@ -275,6 +284,17 @@ async def get_job_status(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+@app.put("/sourcing-jobs/{job_id}/status")
+async def set_job_status(job_id: str, status: str):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    allowed = {"pending", "running", "completed", "failed", "hired"}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
+    db.update_job_status(job_id, status)
+    return {"success": True, "job_id": job_id, "status": status}
 
 @app.get("/sourcing-jobs/{job_id}/results")
 async def get_job_results(job_id: str):
