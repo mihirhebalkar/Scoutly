@@ -28,12 +28,13 @@ class TalentPipelineDB:
             print(f"Could not connect to MongoDB Atlas: {e}")
             raise
 
-    def create_job(self, job_id: str, linkedin_prompt: str, github_prompt: str) -> dict:
+    def create_job(self, job_id: str, linkedin_prompt: str, github_prompt: str, structured_jd: dict | None = None) -> dict:
         job_data = {
             "job_id": job_id,
             "status": "pending",
             "linkedin_prompt": linkedin_prompt,
             "github_prompt": github_prompt,
+            "structured_jd": structured_jd,
             "created_at": datetime.datetime.utcnow(),
             "updated_at": datetime.datetime.utcnow()
         }

@@ -37,6 +37,7 @@ class DeleteAllResponse(BaseModel):
 class SourcingRequest(BaseModel):
     linkedin_prompt: Optional[str] = Field(None, example="Senior Golang Developer in Bangalore")
     github_prompt: Optional[str] = Field(None, example="Python developer in India with FastAPI contributions")
+    structured_jd: Optional[dict] = Field(None, description="Structured JD object captured at job creation time")
 
 class JobResponse(BaseModel):
     job_id: str
@@ -63,7 +64,7 @@ async def create_sourcing_job(request: SourcingRequest, background_tasks: Backgr
         raise HTTPException(status_code=400, detail="At least one prompt (linkedin_prompt or github_prompt) must be provided.")
 
     job_id = shortuuid.uuid()
-    db.create_job(job_id, request.linkedin_prompt, request.github_prompt)
+    db.create_job(job_id, request.linkedin_prompt, request.github_prompt, request.structured_jd)
     
     background_tasks.add_task(run_sourcing_task, job_id, request.linkedin_prompt, request.github_prompt)
     
@@ -146,6 +147,22 @@ async def get_recent_jobs(limit: int = 20):
     
     return {"jobs": recent_jobs, "total": len(completed_jobs)}
 
+@app.get("/sourcing-jobs/recent-with-candidates")
+async def get_recent_jobs_with_candidates(limit: int = 20):
+    """
+    Get recent completed jobs with their candidates for quick access to history.
+    """
+    all_jobs = db.get_all_jobs()
+    completed_jobs = [job for job in all_jobs if job.get('status') == 'completed']
+    
+    # Return most recent N jobs
+    recent_jobs = completed_jobs[:limit]
+    
+    # Add candidates
+    for job in recent_jobs:
+        job['candidates'] = db.get_candidates_by_job_id(job['job_id'])
+    
+    return {"jobs": recent_jobs, "total": len(completed_jobs)}
 
 @app.delete("/sourcing-jobs/{job_id}", response_model=DeleteResponse)
 async def delete_sourcing_job(job_id: str):
@@ -339,3 +356,10 @@ async def cleanup_old_jobs(days_old: int = 30):
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Intelligent Sourcing Agent API"}
+
+@app.on_event("startup")
+async def show_routes():
+    print("\n--- Registered Routes ---")
+    for route in app.routes:
+        print(route.path)
+    print("--------------------------\n")

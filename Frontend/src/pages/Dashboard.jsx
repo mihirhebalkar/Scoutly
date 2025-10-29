@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import {
   FaSearch, FaUpload, FaFileAlt, FaCheck, FaMapMarkerAlt, FaBriefcase, FaUserTie,
-  FaGithub, FaLinkedin, FaHistory, FaTimes, FaSignOutAlt
+  FaGithub, FaLinkedin, FaTimes, FaSignOutAlt
 } from 'react-icons/fa';
 import axios from 'axios';
 
@@ -25,6 +25,7 @@ const Dashboard = () => {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [activeTab, setActiveTab] = useState('new');
   
+  
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   
@@ -35,10 +36,12 @@ const Dashboard = () => {
   const loadSearchHistory = async () => {
     setLoadingHistory(true);
     try {
-      const response = await fetch(`${FASTAPI_URL}/sourcing-jobs/recent?limit=5`);
+      const response = await fetch(`${FASTAPI_URL}/sourcing-jobs`);
       const data = await response.json();
-      console.log('Loaded search history:', data);
-      setSearchHistory(data.jobs || []);
+      const jobs = (data.jobs || [])
+        .filter((j) => j.status === 'completed' && (j.candidate_count || 0) > 0)
+        .slice(0, 10);
+      setSearchHistory(jobs);
     } catch (error) {
       console.error('Error loading history:', error);
     } finally {
@@ -46,9 +49,67 @@ const Dashboard = () => {
     }
   };
 
+  // Build a lightweight structured JD from prompts if not stored
+  const deriveStructuredJD = (job) => {
+    if (!job) return null;
+    const lp = job.linkedin_prompt || '';
+    const gp = job.github_prompt || '';
+    const text = lp || gp;
+    if (!text) return null;
+
+    // Extract job title: take text before ' with ' or ' in '
+    let job_title = text;
+    const lower = text.toLowerCase();
+    const cutWith = lower.indexOf(' with ');
+    const cutIn = lower.indexOf(' in ');
+    let cut = -1;
+    if (cutWith !== -1 && cutIn !== -1) cut = Math.min(cutWith, cutIn);
+    else cut = cutWith !== -1 ? cutWith : cutIn;
+    if (cut !== -1) job_title = text.slice(0, cut).trim();
+
+    // Extract location: after ' in '
+    let location = null;
+    if (cutIn !== -1) {
+      location = text.slice(cutIn + 4).split(/[.,\n]/)[0].trim();
+    }
+
+    // Extract experience: look for patterns like '7+','7+ years','7 years'
+    let experience_required = null;
+    const expMatch = text.match(/(\d+\+?\s*years?)/i) || text.match(/(\d+\+)/i) || text.match(/(\d+)/);
+    if (expMatch) experience_required = expMatch[1];
+
+    // Extract skills: after 'with ' up to next period/comma; split by commas or 'and'
+    let skills_required = [];
+    const withIdx = lower.indexOf(' with ');
+    if (withIdx !== -1) {
+      const after = text.slice(withIdx + 6).split(/[.\n]/)[0];
+      const parts = after.split(/,| and |\s+/).map(s => s.trim()).filter(Boolean);
+      // Filter out common words
+      const stop = new Set(['in','the','a','an','of','for','to','on','and','with','developer','engineer']);
+      const uniq = [];
+      parts.forEach(p => {
+        const key = p.replace(/[^a-z0-9+#.]/gi,'');
+        if (key && !stop.has(key.toLowerCase()) && !uniq.includes(key)) uniq.push(key);
+      });
+      skills_required = uniq.slice(0, 8);
+    }
+
+    return {
+      job_title: job_title || null,
+      company: null,
+      location: location || null,
+      experience_required: experience_required,
+      skills_required,
+      job_type: null,
+      salary_range: null,
+    };
+  };
+
   useEffect(() => {
     loadSearchHistory();
   }, []);
+
+  
 
   // Re-load history after a successful search
   useEffect(() => {
@@ -185,6 +246,7 @@ const Dashboard = () => {
         body: JSON.stringify({
           linkedin_prompt: editablePrompts.linkedin,
           github_prompt: editablePrompts.github,
+          structured_jd: structuredJD,
         }),
       });
       
@@ -279,9 +341,7 @@ const Dashboard = () => {
             >
               New Search
             </button>
-            {searchHistory.map((job) => {
-              const date = new Date(job.created_at);
-              const shortDate = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            {searchHistory.map((job, idx) => {
               const tabId = `history-${job.job_id}`;
               
               return (
@@ -293,9 +353,14 @@ const Dashboard = () => {
                       ? 'text-blue-600 border-b-2 border-blue-600'
                       : 'text-gray-600 hover:text-gray-900'
                   }`}
-                  title={job.linkedin_prompt || job.github_prompt || 'Previous Search'}
+                  title={`${job.linkedin_prompt || job.github_prompt || 'Previous Search'} • ${job.candidate_count || 0} candidates`}
                 >
-                  {shortDate}
+                  <span className="inline-flex items-center gap-2">
+                    {idx + 1}
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-700">
+                      {job.candidate_count || 0}
+                    </span>
+                  </span>
                 </button>
               );
             })}
@@ -562,88 +627,155 @@ const Dashboard = () => {
                 )}
               </div>
             )}
-          </>
-        )}
 
-        {/* History Tabs - Show results for selected history item */}
-        {activeTab.startsWith('history-') && results && (
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
-            {isLoading && (
-              <div className="text-center py-12">
-                <div className="inline-block w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
-                <p className="text-blue-600 font-semibold text-lg">{loadingMessage}</p>
-              </div>
-            )}
+            </>
+          )}
 
-            {!isLoading && results.error && (
-              <div className="text-center py-12">
-                <p className="text-red-600 font-semibold text-lg">{results.error}</p>
-              </div>
-            )}
 
-            {!isLoading && !results.error && results.candidates && results.candidates.length > 0 && (
-              <>
-                <div className="flex items-center justify-between mb-6">
-                  <h2 className="text-2xl font-bold text-gray-900">Previous Search Results</h2>
-                  <p className="text-sm text-gray-600">{results.candidate_count || 0} candidates found</p>
-                </div>
-                <div className="grid gap-6 md:grid-cols-2">
-                  {results.candidates.map((candidate, index) => {
-                    const isGitHub = candidate.source === 'GitHub';
-                    const isLinkedIn = candidate.source === 'LinkedIn';
-                    const scoreColor = candidate.match_score >= 80 ? 'bg-green-100 text-green-800' :
-                                     candidate.match_score >= 60 ? 'bg-yellow-100 text-yellow-800' :
-                                     'bg-orange-100 text-orange-800';
-                    
-                    return (
-                      <div key={index} className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow bg-gradient-to-br from-white to-gray-50">
-                        <div className="flex items-start justify-between mb-4">
-                          <div className="flex-1">
-                            <h3 className="text-lg font-bold text-gray-900">{candidate.name || 'N/A'}</h3>
-                            {candidate.title && (
-                              <p className="text-sm text-gray-500 mt-1">{candidate.title}</p>
-                            )}
+
+            {/* History Tabs - Show results for selected history item */}
+            {activeTab.startsWith('history-') && results && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-8">
+                {isLoading && (
+                  <div className="text-center py-12">
+                    <div className="inline-block w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+                    <p className="text-blue-600 font-semibold text-lg">{loadingMessage}</p>
+                  </div>
+                )}
+
+                {!isLoading && results.error && (
+                  <div className="text-center py-12">
+                    <p className="text-red-600 font-semibold text-lg">{results.error}</p>
+                  </div>
+                )}
+
+                {!isLoading && !results.error && (
+                  <>
+                    {/* Structured JD Summary for History (stored or derived) */}
+                    {(() => {
+                      const jd = results.job_details?.structured_jd || deriveStructuredJD(results.job_details);
+                      if (!jd) return null;
+                      return (
+                        <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 mb-8">
+                          <h2 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                            <FaCheck className="text-green-600" /> Job Description Processed
+                          </h2>
+                          <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-5">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {jd.job_title && (
+                                <div className="flex items-start gap-3">
+                                  <FaBriefcase className="text-blue-600 mt-1" />
+                                  <div>
+                                    <p className="text-sm font-medium text-gray-600">Job Title</p>
+                                    <p className="text-lg font-bold text-gray-900">{jd.job_title}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {jd.location && (
+                                <div className="flex items-start gap-3">
+                                  <FaMapMarkerAlt className="text-blue-600 mt-1" />
+                                  <div>
+                                    <p className="text-sm font-medium text-gray-600">Location</p>
+                                    <p className="text-lg font-bold text-gray-900">{jd.location}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {jd.experience_required && (
+                                <div className="flex items-start gap-3">
+                                  <FaUserTie className="text-blue-600 mt-1" />
+                                  <div>
+                                    <p className="text-sm font-medium text-gray-600">Experience</p>
+                                    <p className="text-lg font-bold text-gray-900">{jd.experience_required}</p>
+                                  </div>
+                                </div>
+                              )}
+                              {Array.isArray(jd.skills_required) && jd.skills_required.length > 0 && (
+                                <div className="flex items-start gap-3">
+                                  <FaMapMarkerAlt className="text-blue-600 mt-1" />
+                                  <div>
+                                    <p className="text-sm font-medium text-gray-600">Skills</p>
+                                    <div className="flex flex-wrap gap-2 mt-2">
+                                      {jd.skills_required.slice(0, 6).map((skill, idx) => (
+                                        <span key={idx} className="px-3 py-1 bg-blue-100 text-blue-800 text-sm font-medium rounded-full">
+                                          {skill}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                          <span className={`px-3 py-1 text-xs font-semibold rounded-full ${scoreColor}`}>
-                            {candidate.match_score || 0}%
-                          </span>
                         </div>
-                        
-                        <div className="flex items-center gap-2 mb-4">
-                          {isLinkedIn && (
-                            <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 text-blue-700 text-xs font-semibold rounded">
-                              <FaLinkedin /> LinkedIn
-                            </span>
-                          )}
-                          {isGitHub && (
-                            <span className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-700 text-xs font-semibold rounded">
-                              <FaGithub /> GitHub
-                            </span>
-                          )}
-                        </div>
-                        
-                        <p className="text-sm text-gray-600 mb-4 line-clamp-3">{candidate.snippet || 'N/A'}</p>
-                        
-                        {candidate.reasoning && (
-                          <p className="text-xs text-gray-500 mb-4 italic">{candidate.reasoning}</p>
-                        )}
-                        
-                        <a 
-                          href={candidate.link} 
-                          target="_blank" 
-                          rel="noopener noreferrer" 
-                          className="inline-flex items-center gap-2 text-sm font-medium text-blue-600 hover:text-blue-700 transition"
-                        >
-                          View Profile →
-                        </a>
+                      );
+                    })()}
+
+                    {/* Candidates block or empty state */}
+                    <div className="flex items-center justify-between mb-6">
+                      <h2 className="text-2xl font-bold text-gray-900">Previous Search Results</h2>
+                      <p className="text-sm text-gray-600">{results.candidate_count || 0} candidates found</p>
+                    </div>
+                    {results.candidates && results.candidates.length > 0 ? (
+                      <div className="grid gap-6 md:grid-cols-2">
+                        {results.candidates.map((candidate, index) => {
+                          const isGitHub = candidate.source === 'GitHub';
+                          const isLinkedIn = candidate.source === 'LinkedIn';
+                          const scoreColor = candidate.match_score >= 80 ? 'bg-green-100 text-green-800' :
+                                           candidate.match_score >= 60 ? 'bg-yellow-100 text-yellow-800' :
+                                           'bg-orange-100 text-orange-800';
+                          
+                        return (
+                          <div key={index} className="border border-gray-200 rounded-xl p-6 hover:shadow-lg transition-shadow bg-gradient-to-br from-white to-gray-50">
+                            <div className="flex items-start justify-between mb-4">
+                              <div className="flex-1">
+                                <h3 className="text-lg font-bold text-gray-900">{candidate.name || 'N/A'}</h3>
+                                {candidate.title && (
+                                  <p className="text-sm text-gray-500 mt-1">{candidate.title}</p>
+                                )}
+                              </div>
+                              <span className={`px-3 py-1 text-xs font-semibold rounded-full ${scoreColor}`}>
+                                {candidate.match_score || 0}%
+                              </span>
+                            </div>
+                            
+                            <div className="flex items-center gap-2 mb-4">
+                              {isLinkedIn && (
+                                <span className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 text-blue-700 text-xs font-semibold rounded">
+                                  <FaLinkedin /> LinkedIn
+                                </span>
+                              )}
+                              {isGitHub && (
+                                <span className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 text-gray-700 text-xs font-semibold rounded">
+                                  <FaGithub /> GitHub
+                                </span>
+                              )}
+                            </div>
+                            
+                            <p className="text-sm text-gray-600 mb-4 line-clamp-3">{candidate.snippet || 'N/A'}</p>
+                            
+                            {candidate.reasoning && (
+                              <p className="text-xs text-gray-500 mb-4 italic">{candidate.reasoning}</p>
+                            )}
+                            
+                            <a 
+                              href={candidate.link} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="inline-flex items-center gap-2 text-sm font-medium text-blue-600 hover:text-blue-700 transition"
+                            >
+                              View Profile →
+                            </a>
+                          </div>
+                        );
+                      })}
                       </div>
-                    );
-                  })}
-                </div>
-              </>
+                    ) : (
+                      <div className="text-center py-8 text-gray-500">No candidates stored for this search.</div>
+                    )}
+                  </>
+                )}
+              </div>
             )}
-          </div>
-        )}
       </main>
     </div>
   );
