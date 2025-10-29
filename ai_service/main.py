@@ -1,9 +1,10 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-import shortuuid
 from typing import Optional
 import os
+import shortuuid
+from io import BytesIO
 
 from utils.database import TalentPipelineDB
 from worker import run_sourcing_task
@@ -37,7 +38,6 @@ class DeleteAllResponse(BaseModel):
 class SourcingRequest(BaseModel):
     linkedin_prompt: Optional[str] = Field(None, example="Senior Golang Developer in Bangalore")
     github_prompt: Optional[str] = Field(None, example="Python developer in India with FastAPI contributions")
-    structured_jd: Optional[dict] = Field(None, description="Structured JD object captured at job creation time")
 
 class JobResponse(BaseModel):
     job_id: str
@@ -64,7 +64,7 @@ async def create_sourcing_job(request: SourcingRequest, background_tasks: Backgr
         raise HTTPException(status_code=400, detail="At least one prompt (linkedin_prompt or github_prompt) must be provided.")
 
     job_id = shortuuid.uuid()
-    db.create_job(job_id, request.linkedin_prompt, request.github_prompt, request.structured_jd)
+    db.create_job(job_id, request.linkedin_prompt, request.github_prompt)
     
     background_tasks.add_task(run_sourcing_task, job_id, request.linkedin_prompt, request.github_prompt)
     
@@ -72,6 +72,201 @@ async def create_sourcing_job(request: SourcingRequest, background_tasks: Backgr
         "job_id": job_id,
         "status": "pending",
         "message": "Sourcing job has been successfully created and is running in the background."
+    }
+
+@app.post("/api/saved-candidates/resume")
+async def upload_saved_candidate_resume(
+    file: UploadFile = File(...),
+    job_id: str = Form(...),
+    candidate_link: str = Form(...),
+):
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    file_id = db.save_resume(content, file.filename, file.content_type or "application/octet-stream", metadata={
+        "job_id": job_id,
+        "candidate_link": candidate_link,
+        "saved": True,
+    })
+    linked = db.set_resume_for_saved_candidate(job_id, candidate_link, file_id)
+    if not linked:
+        raise HTTPException(status_code=404, detail="Saved candidate not found to attach resume")
+    return {"success": True, "file_id": file_id}
+
+# -------- Saved Candidates API --------
+class SaveCandidateRequest(BaseModel):
+    job_id: str
+    candidate_link: str
+    name: Optional[str] = None
+    notes: Optional[str] = None
+    contacted: bool = False
+    review: Optional[int] = Field(None, ge=1, le=5)
+    job_title: Optional[str] = None
+    email: Optional[str] = None
+    linkedin: Optional[str] = None
+
+def _derive_job_title(job: Optional[dict]) -> Optional[str]:
+    if not job:
+        return None
+    # Prefer structured_jd.job_title if present
+    sjd = job.get('structured_jd') if isinstance(job, dict) else None
+    if isinstance(sjd, dict) and sjd.get('job_title'):
+        return sjd.get('job_title')
+    # Try prompts
+    text = (job.get('linkedin_prompt') or job.get('github_prompt') or '').strip()
+    if not text:
+        return None
+    lower = text.lower()
+    cut_with = lower.find(' with ')
+    cut_in = lower.find(' in ')
+    cut = -1
+    if cut_with != -1 and cut_in != -1:
+        cut = min(cut_with, cut_in)
+    else:
+        cut = cut_with if cut_with != -1 else cut_in
+    title = text[:cut].strip() if cut != -1 else text
+    return title if title else None
+
+@app.post("/saved-candidates")
+async def save_candidate(req: SaveCandidateRequest):
+    job = db.get_job(req.job_id)
+    title = req.job_title or _derive_job_title(job) or "Untitled Job"
+    ok = db.save_candidate_for_job(
+        job_id=req.job_id,
+        candidate_link=req.candidate_link,
+        name=req.name,
+        notes=req.notes,
+        contacted=req.contacted,
+        review=req.review,
+        job_title=title,
+        email=req.email,
+        linkedin=req.linkedin,
+    )
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to save candidate")
+    return {"success": True}
+
+@app.put("/saved-candidates")
+async def update_saved_candidate(req: SaveCandidateRequest):
+    # Same handler, upsert semantics in DB
+    return await save_candidate(req)
+
+@app.get("/saved-candidates")
+async def list_saved_candidates(job_id: Optional[str] = None):
+    docs = db.get_saved_candidates(job_id)
+    return {"items": docs, "total": len(docs)}
+
+@app.get("/saved-candidates/grouped")
+async def list_saved_candidates_grouped():
+    grouped = db.get_saved_candidates_grouped()
+    return {"groups": grouped, "group_count": len(grouped)}
+
+@app.delete("/saved-candidates")
+async def delete_saved_candidate(job_id: str, candidate_link: str):
+    ok = db.delete_saved_candidate(job_id, candidate_link)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Saved candidate not found")
+    return {"success": True}
+
+# -------- Resume Analyzer --------
+from fastapi import UploadFile, File, Form
+
+def _extract_text_from_pdf(file_bytes: bytes) -> str:
+    try:
+        import PyPDF2
+        reader = PyPDF2.PdfReader(BytesIO(file_bytes))
+        text = []
+        for page in reader.pages:
+            text.append(page.extract_text() or "")
+        return "\n".join(text)
+    except Exception:
+        return ""
+
+def _extract_text_from_docx(file_bytes: bytes) -> str:
+    try:
+        import docx
+        doc = docx.Document(BytesIO(file_bytes))
+        return "\n".join(p.text for p in doc.paragraphs)
+    except Exception:
+        return ""
+
+def _simple_tokenize(s: str) -> set[str]:
+    import re
+    toks = re.findall(r"[a-zA-Z0-9+#.]+", (s or "").lower())
+    stop = {"the","and","in","of","to","a","an","with","for","on","at","by","is","are","as","be"}
+    return {t for t in toks if t not in stop}
+
+def _score_resume_against_jd(resume_text: str, jd_obj: dict | None, jd_fallback_text: str | None) -> tuple[int, str]:
+    # Build JD text from structured fields if possible
+    parts = []
+    if jd_obj:
+        for k in ("job_title","location","experience_required"):
+            v = jd_obj.get(k)
+            if v:
+                parts.append(str(v))
+        skills = jd_obj.get("skills_required") or []
+        if isinstance(skills, list):
+            parts.extend([str(s) for s in skills])
+    jd_text = (" ".join(parts)).strip() or (jd_fallback_text or "")
+    R = _simple_tokenize(resume_text)
+    J = _simple_tokenize(jd_text)
+    if not R or not J:
+        return 0, "Insufficient data to compute score"
+    overlap = len(R & J)
+    denom = len(J)
+    score = int(round(100 * overlap / max(denom, 1)))
+    reasoning = f"Matched {overlap} of {denom} JD terms."
+    return score, reasoning
+
+@app.post("/api/resume/analyze")
+async def analyze_resume(file: UploadFile = File(...), job_id: Optional[str] = Form(None)):
+    content = await file.read()
+    text = ""
+    if file.filename.lower().endswith(".pdf"):
+        text = _extract_text_from_pdf(content)
+    elif file.filename.lower().endswith(".docx"):
+        text = _extract_text_from_docx(content)
+    if not text:
+        # Fallback naive decode
+        try:
+            text = content.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+
+    if not text:
+        raise HTTPException(status_code=400, detail="Could not extract text from resume")
+
+    # Select JD: by job_id or last completed
+    job = None
+    if job_id:
+        job = db.get_job(job_id)
+    else:
+        jobs = db.get_all_jobs()
+        for j in jobs:
+            if j.get("status") == "completed":
+                job = j
+                break
+    if not job:
+        raise HTTPException(status_code=404, detail="No job found to compare against")
+
+    jd_obj = job.get("structured_jd") if isinstance(job, dict) else None
+    fallback_text = (job.get("linkedin_prompt") or job.get("github_prompt") or "") if isinstance(job, dict) else ""
+    score, reasoning = _score_resume_against_jd(text, jd_obj, fallback_text)
+
+    # Store resume via GridFS
+    file_id = db.save_resume(content, file.filename, file.content_type or "application/octet-stream", metadata={
+        "job_id": job.get("job_id") if isinstance(job, dict) else None,
+        "analyzed": True,
+        "score": score,
+    })
+
+    return {
+        "success": True,
+        "job_id": job.get("job_id") if isinstance(job, dict) else None,
+        "resume_text_preview": text[:1000],
+        "score": score,
+        "reasoning": reasoning,
+        "file_id": file_id,
     }
 
 @app.get("/sourcing-jobs/{job_id}")
@@ -356,10 +551,3 @@ async def cleanup_old_jobs(days_old: int = 30):
 @app.get("/")
 async def root():
     return {"message": "Welcome to the Intelligent Sourcing Agent API"}
-
-@app.on_event("startup")
-async def show_routes():
-    print("\n--- Registered Routes ---")
-    for route in app.routes:
-        print(route.path)
-    print("--------------------------\n")
