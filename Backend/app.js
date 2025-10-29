@@ -55,11 +55,19 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error("Not allowed by CORS"));
-    }
+    // Allow server-to-server, CLI tools, and same-origin requests (no Origin header)
+    if (!origin) return callback(null, true);
+
+    // Allow exact matches in allowedOrigins
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+
+    // Allow Vercel preview deployments like https://<branch>-<project>.vercel.app
+    try {
+      const url = new URL(origin);
+      if (url.hostname.endsWith('.vercel.app')) return callback(null, true);
+    } catch (_) {}
+
+    return callback(new Error('Not allowed by CORS'));
   },
   credentials: true
 }));
@@ -180,5 +188,10 @@ app.post("/api/generate-prompts", auth, async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// For Vercel serverless, export the app. For local dev, start the server.
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}

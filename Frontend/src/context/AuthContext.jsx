@@ -11,8 +11,14 @@ export const useAuth = () => {
   return context;
 };
 
+
+const API_BASE_URL =
+  process.env.NODE_ENV === 'production'
+    ? 'https://scoutly13-api.vercel.app'  // Node backend deployed on Vercel
+    : 'http://localhost:5000';
+
 // Configure axios defaults
-axios.defaults.baseURL = 'http://localhost:5000';
+axios.defaults.baseURL = (import.meta?.env?.VITE_API_URL) || API_BASE_URL;
 
 // Add token to requests if available
 axios.interceptors.request.use(
